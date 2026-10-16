@@ -2,7 +2,7 @@
     "id": "audionorm",
     "name": "AudioNorm",
     "description": "Выравнивает громкость импортированных треков: измеряет её по EBU R128 и передаёт встроенной нормализации громкости.",
-    "version": "0.4.1",
+    "version": "0.4.2",
     "author": "Qwill552",
     "type": "script",
     "image": "assets/logo.png",

@@ -1,7 +1,7 @@
 (function () {
     'use strict'
 
-    const VERSION = '0.4.1' // keep in sync with metadata.json
+    const VERSION = '0.4.2' // keep in sync with metadata.json
     const ADDON_NAME = 'AudioNorm'
     const TAG = '[AudioNorm]'
     const CACHE_KEY = 'audionorm:cache:v2'
@@ -248,7 +248,8 @@
         return list.map(item => item?.entity ?? item).filter(e => metaOf(e))
     }
 
-    // Debug report only; measurements never read the <audio> element (it may hold another track).
+    // Measurements never read the <audio> element (it may hold another track); used only for
+    // the debug report and for track-boundary timing in the start hook.
     function getCurrentAudioElement() {
         const mp = getMediaPlayer()
         const el = obsValue(mp?.currentAudioElement) ?? obsValue(mp?.currentMediaPlayer?.currentAudioElement)
@@ -1106,6 +1107,43 @@
         }
     }
 
+    // Until the next track's src is set (after this hook), the <audio> element still holds
+    // the previous track. After a natural end the YASP element keeps shouldPlay = true (only
+    // its own pause() clears it), so any canplay there, or the player's resume() (media keys),
+    // restarts the finished track from 0 until the new src arrives. pause() on an ended
+    // element fires no events: it only clears that flag.
+    function settleEndedAudio(el) {
+        if (!settings.enabled || !el?.ended) return
+        try {
+            el.pause()
+        } catch {}
+    }
+
+    const watchedAudio = new WeakSet()
+
+    function watchAudioEnd() {
+        const el = getCurrentAudioElement()
+        if (!el || watchedAudio.has(el)) return
+        watchedAudio.add(el)
+        // 'pause' comes right at the end; 'ended' may come only after the next src is set
+        for (const type of ['pause', 'ended']) el.addEventListener(type, () => settleEndedAudio(el))
+    }
+
+    const END_MARGIN_MS = 300
+
+    // How long the hook may hold the start without hurting the previous track. A finished
+    // track waits in the element (see settleEndedAudio): do not stretch that window. A
+    // still-playing one (skip near the end) must not end during the wait, or the player
+    // treats it as a natural end and advances again, skipping the chosen track.
+    function startWaitLimitMs() {
+        const el = getCurrentAudioElement()
+        if (!el) return settings.maxWaitMs
+        const leftMs = ((el.duration - el.currentTime) * 1000) / (el.playbackRate || 1)
+        if (el.ended || leftMs < END_MARGIN_MS) return 0
+        if (el.paused || !Number.isFinite(leftMs)) return settings.maxWaitMs
+        return Math.min(settings.maxWaitMs, leftMs - END_MARGIN_MS)
+    }
+
     function tapStartHook(hook) {
         hook.tapPromise({ name: 'AudioNorm', stage: HOOK_STAGE }, async () => {
             // Must never throw: a rejected tap could break playback start.
@@ -1113,13 +1151,15 @@
             hookRunning++
             try {
                 refreshSettings()
+                settleEndedAudio(getCurrentAudioElement())
                 meta = metaOf(getCurrentEntity())
                 if (settings.enabled && isUgc(meta)) {
                     applyToMeta(meta)
                     if (needsMeasure(meta) && settings.maxWaitMs > 0 && !normalizationOff()) {
                         const p = measureCurrentIfNeeded()
-                        if (p) {
-                            await Promise.race([p, sleep(settings.maxWaitMs)])
+                        const waitMs = startWaitLimitMs()
+                        if (p && waitMs > 0) {
+                            await Promise.race([p, sleep(waitMs)])
                             applyToMeta(meta)
                         }
                     }
@@ -1382,6 +1422,7 @@
         setInterval(() => {
             refreshSettings()
             installHooks()
+            watchAudioEnd()
             if (settings.enabled && !normalizationOff()) {
                 applyToQueue()
                 const id = String(metaOf(getCurrentEntity())?.id ?? '')
